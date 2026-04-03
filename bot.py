@@ -1,12 +1,13 @@
 import asyncio
 import logging
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from config import BOT_TOKEN, TMP_DIR, MAX_AUDIO_SIZE_MB, SUPPORTED_EXTENSIONS, WHISPER_MODEL, WHISPER_COMPUTE_TYPE
+from config import BOT_TOKEN, TMP_DIR, MAX_AUDIO_SIZE_MB, SUPPORTED_EXTENSIONS, WHISPER_MODEL, WHISPER_COMPUTE_TYPE, OBSIDIAN_TRANSCRIPTIONS
 from transcriber import transcribe_audio
 
 logging.basicConfig(
@@ -67,7 +68,7 @@ async def _process_audio(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"{result.text}\n"
         )
 
-        md_filename = f"transcription_{now.strftime('%Y-%m-%d_%H%M%S')}.md"
+        md_filename = f"Transcription - {now.strftime('%b %-d, %Y %-I.%M %p')}.md"
         md_path = TMP_DIR / md_filename
         md_path.write_text(markdown, encoding="utf-8")
 
@@ -76,6 +77,8 @@ async def _process_audio(update: Update, context: ContextTypes.DEFAULT_TYPE,
             filename=md_filename,
             caption=f"{result.language} | {duration_min}m {duration_sec:02d}s",
         )
+        shutil.copy2(md_path, OBSIDIAN_TRANSCRIPTIONS / md_filename)
+        logger.info(f"Saved to Obsidian: {md_filename}")
         await status_msg.delete()
     except Exception as e:
         logger.error(f"Transcription failed: {e}", exc_info=True)

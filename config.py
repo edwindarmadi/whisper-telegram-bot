@@ -12,3 +12,6 @@ WHISPER_MODEL = "large-v3"
 WHISPER_COMPUTE_TYPE = "int8"
 MAX_AUDIO_SIZE_MB = 20
 SUPPORTED_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a"}
+
+OBSIDIAN_TRANSCRIPTIONS = Path("/Users/edwindarmadi/Edwin's Notepad/Transcriptions")
+OBSIDIAN_TRANSCRIPTIONS.mkdir(exist_ok=True)
