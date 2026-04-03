@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from faster_whisper import WhisperModel
 from config import WHISPER_MODEL, WHISPER_COMPUTE_TYPE
@@ -7,7 +7,16 @@ _model: WhisperModel | None = None
 
 
 @dataclass
+class Segment:
+    start: float
+    end: float
+    text: str
+    speaker: str | None = None
+
+
+@dataclass
 class TranscriptionResult:
+    segments: list[Segment]
     text: str
     language: str
     duration: float
@@ -26,12 +35,19 @@ def get_model() -> WhisperModel:
 def transcribe_audio(file_path: Path) -> TranscriptionResult:
     """Synchronous — call via asyncio.to_thread() from async code."""
     model = get_model()
-    segments, info = model.transcribe(str(file_path), beam_size=5, vad_filter=True)
+    raw_segments, info = model.transcribe(str(file_path), beam_size=5, vad_filter=True)
 
-    paragraphs = [segment.text.strip() for segment in segments]
+    segments = []
+    for s in raw_segments:
+        text = s.text.strip()
+        if text:
+            segments.append(Segment(start=s.start, end=s.end, text=text))
+
+    text = "\n\n".join(seg.text for seg in segments)
 
     return TranscriptionResult(
-        text="\n\n".join(paragraphs),
+        segments=segments,
+        text=text,
         language=info.language,
         duration=info.duration,
     )

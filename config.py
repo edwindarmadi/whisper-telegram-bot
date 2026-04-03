@@ -15,3 +15,7 @@ SUPPORTED_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a"}
 
 OBSIDIAN_TRANSCRIPTIONS = Path("/Users/edwindarmadi/Edwin's Notepad/Transcriptions")
 OBSIDIAN_TRANSCRIPTIONS.mkdir(exist_ok=True)
+
+SPEAKERS_DIR = Path("./speakers")
+SPEAKERS_DIR.mkdir(exist_ok=True)
+SPEAKER_SIMILARITY_THRESHOLD = 0.65
