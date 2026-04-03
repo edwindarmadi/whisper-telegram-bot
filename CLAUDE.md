@@ -2,7 +2,7 @@
 
 ## What this is
 
-A personal Telegram bot that transcribes voice messages and audio files using faster-whisper (large-v3, int8) running locally on a Mac Mini M4 (16GB RAM). No cloud APIs. No LLM cleanup. Just Whisper → markdown file → back to Telegram.
+A personal Telegram bot that transcribes voice messages, audio files, and videos using faster-whisper (large-v3, int8) running locally on a Mac Mini M4 (16GB RAM). No cloud APIs. No LLM cleanup. Just Whisper → markdown file → back to Telegram.
 
 ---
 
@@ -24,19 +24,23 @@ Telegram ──> bot.py (polling) ──> transcriber.py ──> faster-whisper 
 |------|-------------|
 | `config.py` | Loads `.env`, defines all constants (model, paths, limits, supported formats). Creates `tmp/` directory on import. |
 | `transcriber.py` | Loads the Whisper model once (lazy singleton). Exposes `transcribe_audio(path)` which returns a `TranscriptionResult` dataclass (text, language, duration). Synchronous — meant to be called via `asyncio.to_thread()`. |
-| `bot.py` | All Telegram logic. Handlers for voice, audio, and document messages. Shared `_process_audio()` does: size check → download → transcribe → generate markdown → send file → cleanup. Also has `/start` command and global error handler. |
+| `bot.py` | All Telegram logic. Handlers for voice, audio, video, video notes, and documents. Shared `_process_audio()` does: size check → download → transcribe → generate markdown → send file → cleanup. Also has `/start` command and global error handler. |
 
-### How audio arrives in Telegram (3 different ways)
+### How media arrives in Telegram (5 different ways)
 
-This tripped us up during development. Telegram sends audio in **three different message types** depending on how the user sends it:
+This tripped us up during development. Telegram sends media in **five different message types** depending on how the user sends it:
 
 | How user sends it | Telegram message type | Filter in code | Format |
 |---|---|---|---|
 | Record a voice message | `voice` | `filters.VOICE` | Always `.ogg` Opus |
 | Attach via audio picker | `audio` | `filters.AUDIO` | mp3, m4a, etc. |
+| Send a video | `video` | `filters.VIDEO` | mp4, etc. |
+| Record a video note (circle) | `video_note` | `filters.VIDEO_NOTE` | mp4 |
 | Drag-and-drop a file | `document` | `filters.Document.ALL` | Any extension |
 
-Each needs its own handler because the Telegram API object is different (`update.message.voice` vs `.audio` vs `.document`), but they all call the same `_process_audio()` function.
+Each needs its own handler because the Telegram API object is different (`update.message.voice` vs `.audio` vs `.video` vs `.video_note` vs `.document`), but they all call the same `_process_audio()` function.
+
+Video files work because ffmpeg (used by faster-whisper under the hood) automatically extracts the audio track — no separate conversion step needed.
 
 ---
 
@@ -104,7 +108,7 @@ python bot.py
 **Why this happened to us:** During development, background processes from previous runs weren't fully killed. `pkill -f "python bot.py"` didn't catch them because macOS was running them under the full Python framework path. Always use `ps aux | grep bot.py` to verify.
 
 ### ffmpeg is required but not obvious
-faster-whisper uses ffmpeg under the hood to decode audio files (ogg, mp3, m4a, etc.). Without it, transcription fails with a cryptic error. Install via:
+faster-whisper uses ffmpeg under the hood to decode audio AND video files (ogg, mp3, m4a, mp4, etc.). Without it, transcription fails with a cryptic error. Install via:
 ```bash
 brew install ffmpeg
 ```
@@ -142,15 +146,21 @@ python bot.py
 
 The bot runs until you hit Ctrl+C or close the terminal.
 
-### Running permanently (options)
+### Running permanently (launchd — already set up)
 
-| Method | Setup | Auto-start on boot? |
-|--------|-------|---------------------|
-| **Terminal tab** | Just run `python bot.py` | No |
-| **launchd** | Create a `.plist` file in `~/Library/LaunchAgents/` | Yes |
-| **Docker** | Create Dockerfile + docker-compose.yml | Yes (with restart policy) |
+The bot runs as a launchd service, managed by macOS. It auto-starts on login and auto-restarts on crash.
 
-**launchd is recommended** for staying on this Mac Mini — zero overhead, native macOS. Docker is better if you plan to move this to a Linux server.
+**Plist location:** `~/Library/LaunchAgents/com.whisper.telegram-bot.plist`
+
+| What you want | Command |
+|---|---|
+| Start the bot | `launchctl load ~/Library/LaunchAgents/com.whisper.telegram-bot.plist` |
+| Stop the bot | `launchctl unload ~/Library/LaunchAgents/com.whisper.telegram-bot.plist` |
+| Check if running | `launchctl list \| grep whisper` |
+| View logs | `cat ~/Library/Logs/whisper-bot.log` |
+| View error logs | `cat ~/Library/Logs/whisper-bot-error.log` |
+
+**Important:** Before loading, make sure no other bot process is running or you'll get the 409 Conflict error.
 
 ---
 
@@ -159,11 +169,13 @@ The bot runs until you hit Ctrl+C or close the terminal.
 1. **Basic connectivity:** Send `/start` — should get welcome message
 2. **Voice message:** Record and send a voice message — should get `.md` file back
 3. **Audio file:** Send an mp3/wav/m4a — should get `.md` file back
-4. **Document upload:** Drag-and-drop an audio file — should get `.md` file back
-5. **Oversized file:** Send a file > 20MB — should get a friendly error
-6. **Unsupported format:** Send audio as "audio" with a weird extension — should get format list
-7. **Non-audio document:** Send a PDF — should be silently ignored
-8. **Concurrent requests:** Send two voice messages quickly — second should say "queued"
+4. **Video:** Send a video — should extract audio and get `.md` file back
+5. **Video note:** Record a circle video note — should get `.md` file back
+6. **Document upload:** Drag-and-drop an audio file — should get `.md` file back
+7. **Oversized file:** Send a file > 20MB — should get a friendly error
+8. **Unsupported format:** Send audio as "audio" with a weird extension — should get format list
+9. **Non-audio document:** Send a PDF — should be silently ignored
+10. **Concurrent requests:** Send two voice messages quickly — second should say "queued"
 
 ---
 
@@ -186,7 +198,7 @@ The bot runs until you hit Ctrl+C or close the terminal.
 | `WHISPER_MODEL` | `"large-v3"` | Whisper model size. Options: tiny, base, small, medium, large-v3 |
 | `WHISPER_COMPUTE_TYPE` | `"int8"` | Quantization. Options: float32, float16, int8. Lower = less RAM but slightly less accurate |
 | `MAX_AUDIO_SIZE_MB` | `20` | Max audio file size in MB |
-| `SUPPORTED_EXTENSIONS` | `.ogg .mp3 .wav .m4a` | Accepted audio formats |
+| `SUPPORTED_EXTENSIONS` | `.ogg .mp3 .wav .m4a` | Accepted audio formats (for document uploads only — voice, video, and video_note bypass this check) |
 | `TMP_DIR` | `./tmp` | Where temp files are stored during processing |
 
 ---
