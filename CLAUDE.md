@@ -2,18 +2,22 @@
 
 ## What this is
 
-A personal Telegram bot that transcribes voice messages, audio files, and videos using faster-whisper (large-v3, int8) running locally on a Mac Mini M4 (16GB RAM). No cloud APIs. No LLM cleanup. Just Whisper → markdown file → back to Telegram.
+A personal Telegram bot that transcribes voice messages, audio files, and videos using faster-whisper (large-v3-turbo, int8) running locally on a Mac Mini M4 (16GB RAM). Includes optional speaker identification — enroll voices and the bot labels who's speaking in each transcript. No cloud APIs. No LLM cleanup. Just Whisper → markdown file → back to Telegram.
 
 ---
 
 ## Architecture
 
 ```
-Telegram ──> bot.py (polling) ──> transcriber.py ──> faster-whisper (large-v3)
+Telegram ──> bot.py (polling) ──> transcriber.py ──> faster-whisper (large-v3-turbo)
                 │                       │
-                │                       └── Returns: text, language, duration
+                │                       └── Returns: segments, text, language, duration
                 │
-                ├── Generates .md file with metadata header
+                ├── speaker_id.py (optional) ──> SpeechBrain ECAPA-TDNN
+                │       │
+                │       └── Matches each segment to enrolled voice fingerprints
+                │
+                ├── Generates .md file with metadata + speaker labels
                 ├── Sends .md back to Telegram
                 └── Cleans up temp files
 ```
@@ -22,9 +26,10 @@ Telegram ──> bot.py (polling) ──> transcriber.py ──> faster-whisper 
 
 | File | What it does |
 |------|-------------|
-| `config.py` | Loads `.env`, defines all constants (model, paths, limits, supported formats). Creates `tmp/` directory on import. |
-| `transcriber.py` | Loads the Whisper model once (lazy singleton). Exposes `transcribe_audio(path)` which returns a `TranscriptionResult` dataclass (text, language, duration). Synchronous — meant to be called via `asyncio.to_thread()`. |
-| `bot.py` | All Telegram logic. Handlers for voice, audio, video, video notes, and documents. Shared `_process_audio()` does: size check → download → transcribe → generate markdown → send file → cleanup. Also has `/start` command and global error handler. |
+| `config.py` | Loads `.env`, defines all constants (model, paths, limits, supported formats, speaker ID settings). Creates `tmp/` and `speakers/` directories on import. |
+| `transcriber.py` | Loads the Whisper model once (lazy singleton). Exposes `transcribe_audio(path)` which returns a `TranscriptionResult` dataclass (segments, text, language, duration). Each segment has start/end times, text, and an optional speaker label. Synchronous — meant to be called via `asyncio.to_thread()`. |
+| `bot.py` | All Telegram logic. Handlers for voice, audio, video, video notes, and documents. Shared `_process_audio()` does: size check → download → transcribe → identify speakers (if enrolled) → generate markdown → send file → cleanup. Also has `/start`, `/enroll`, `/done`, `/speakers`, `/unenroll` commands and global error handler. |
+| `speaker_id.py` | Speaker identification using SpeechBrain's ECAPA-TDNN model. Handles enrollment (storing voice fingerprints), identification (matching segments to enrolled speakers), and clustering (labeling unknown speakers consistently as "Speaker 1", "Speaker 2", etc.). |
 
 ### How media arrives in Telegram (5 different ways)
 
@@ -68,7 +73,14 @@ Video files work because ffmpeg (used by faster-whisper under the hood) automati
 
 ### Lazy model loading (singleton pattern)
 - **Why:** The Whisper model takes several seconds to load and ~6-8GB RAM. Loading at import time would slow down bot startup and make it impossible to test Telegram connectivity without the model. Loading on first request means the bot starts instantly, and you can verify the connection works before the heavy model loads.
-- **Pattern:** Module-level `_model` variable in `transcriber.py`, initialized on first call to `get_model()`.
+- **Pattern:** Module-level `_model` variable in `transcriber.py`, initialized on first call to `get_model()`. Same pattern used for the speaker embedding model in `speaker_id.py`.
+
+### SpeechBrain ECAPA-TDNN for speaker identification
+- **Why:** ECAPA-TDNN is a well-established model for speaker verification/identification. SpeechBrain provides a pre-trained version that works out of the box — no training needed.
+- **How it works:** Each speaker's voice is converted into a 192-dimensional "embedding" (a fingerprint of their voice). During transcription, each segment's embedding is compared to enrolled speakers using cosine similarity (how similar two vectors are, from -1 to 1). If similarity ≥ 0.65, it's labeled with that speaker's name. Unknown speakers get clustered so "Speaker 1" stays consistent.
+- **RAM:** The speaker model adds only ~230MB on top of Whisper. Total with both models loaded: ~1.9GB.
+- **Enrollment:** Users send audio clips via `/enroll <Name>`. Each clip's embedding is averaged with previous clips for that speaker, improving accuracy with more samples.
+- **Storage:** Enrolled speakers are stored in `./speakers/<name>/` with raw audio clips and an `embedding.npy` file.
 
 ---
 
@@ -113,13 +125,14 @@ faster-whisper uses ffmpeg under the hood to decode audio AND video files (ogg, 
 brew install ffmpeg
 ```
 
-### First run downloads ~3GB
-The first time `transcriber.py` loads the model, it downloads `large-v3` from Hugging Face to `~/.cache/huggingface/`. This takes several minutes on a normal connection. After that, it's cached and loads in seconds.
+### First run downloads models
+The first time `transcriber.py` loads, it downloads the Whisper model (~3GB) from Hugging Face to `~/.cache/huggingface/`. The first time `speaker_id.py` loads, it downloads the ECAPA-TDNN model (~200MB). After that, both are cached and load in seconds.
 
 To pre-download without running the bot:
 ```bash
 source venv/bin/activate
-python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3', device='auto', compute_type='int8')"
+python -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='auto', compute_type='int8')"
+python -c "from speaker_id import get_speaker_model; get_speaker_model()"
 ```
 
 ### Temp file cleanup
@@ -176,6 +189,10 @@ The bot runs as a launchd service, managed by macOS. It auto-starts on login and
 8. **Unsupported format:** Send audio as "audio" with a weird extension — should get format list
 9. **Non-audio document:** Send a PDF — should be silently ignored
 10. **Concurrent requests:** Send two voice messages quickly — second should say "queued"
+11. **Enroll speaker:** `/enroll TestName` → send voice clip → `/done` — should confirm enrollment
+12. **List speakers:** `/speakers` — should show TestName
+13. **Transcribe with speaker:** Send a voice message — transcript should show speaker labels
+14. **Unenroll speaker:** `/unenroll TestName` → `/speakers` — should be empty
 
 ---
 
@@ -186,6 +203,11 @@ The bot runs as a launchd service, managed by macOS. It auto-starts on login and
 | python-telegram-bot | Telegram Bot API wrapper (async) | pip (requirements.txt) |
 | faster-whisper | Whisper transcription via CTranslate2 | pip (requirements.txt) |
 | python-dotenv | Load .env file | pip (requirements.txt) |
+| speechbrain | Speaker embedding model (ECAPA-TDNN) | pip (requirements.txt) |
+| torch | PyTorch — required by speechbrain and torchaudio | pip (requirements.txt) |
+| torchaudio | Audio loading/resampling for speaker ID | pip (requirements.txt) |
+| torchcodec | Audio decoding backend for torchaudio 2.11+ | pip (requirements.txt) |
+| numpy | Array operations for speaker embeddings | pip (requirements.txt) |
 | ffmpeg | Audio decoding (used by faster-whisper) | `brew install ffmpeg` |
 
 ---
@@ -195,11 +217,13 @@ The bot runs as a launchd service, managed by macOS. It auto-starts on login and
 | Constant | Default | What it controls |
 |----------|---------|-----------------|
 | `BOT_TOKEN` | from `.env` | Telegram bot token |
-| `WHISPER_MODEL` | `"large-v3"` | Whisper model size. Options: tiny, base, small, medium, large-v3 |
+| `WHISPER_MODEL` | `"large-v3-turbo"` | Whisper model size. Options: tiny, base, small, medium, large-v3, large-v3-turbo |
 | `WHISPER_COMPUTE_TYPE` | `"int8"` | Quantization. Options: float32, float16, int8. Lower = less RAM but slightly less accurate |
 | `MAX_AUDIO_SIZE_MB` | `20` | Max audio file size in MB |
 | `SUPPORTED_EXTENSIONS` | `.ogg .mp3 .wav .m4a` | Accepted audio formats (for document uploads only — voice, video, and video_note bypass this check) |
 | `TMP_DIR` | `./tmp` | Where temp files are stored during processing |
+| `SPEAKERS_DIR` | `./speakers` | Where enrolled speaker data is stored (audio clips + embeddings) |
+| `SPEAKER_SIMILARITY_THRESHOLD` | `0.65` | Cosine similarity threshold for speaker matching. Higher = stricter matching (fewer false positives, more unknowns). Lower = looser matching. |
 
 ---
 
@@ -209,4 +233,6 @@ The bot runs as a launchd service, managed by macOS. It auto-starts on login and
 - **20MB file limit** — Telegram Bot API constraint. No workaround in standard mode.
 - **Single transcription at a time** — by design, to prevent OOM on 16GB RAM.
 - **No language selection** — auto-detects language. If auto-detection is wrong, there's no way to override via the chat interface (would need a `/lang` command).
-- **No speaker diarization** — Whisper doesn't identify who is speaking. All speech is one continuous transcript.
+- **Speaker ID requires enrollment** — speakers must be enrolled via `/enroll` before they can be identified. Without enrollment, transcripts have no speaker labels (same as before).
+- **No automatic speaker diarization** — the bot identifies enrolled speakers by matching voice fingerprints, but it doesn't automatically separate unknown speakers into distinct voices unless there are enrolled speakers to compare against.
+- **Enrollment has no timeout** — if you send `/enroll` and forget to send `/done`, every audio message goes to enrollment instead of transcription. Send `/done` to exit.
