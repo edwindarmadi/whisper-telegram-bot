@@ -3,7 +3,6 @@ import logging
 from pathlib import Path
 
 import numpy as np
-import torch
 import torchaudio
 from speechbrain.inference.speaker import EncoderClassifier
 
@@ -27,7 +26,7 @@ def get_speaker_model() -> EncoderClassifier:
     return _speaker_model
 
 
-def extract_embedding(audio_path: Path, start: float | None = None, end: float | None = None) -> np.ndarray:
+def extract_embedding(audio_path: Path, start: float | None = None, end: float | None = None) -> np.ndarray | None:
     """Extract a speaker embedding from an audio file or a segment of it."""
     waveform, sample_rate = torchaudio.load(str(audio_path))
 
@@ -146,7 +145,7 @@ def _cluster_unknown_speakers(embeddings: list[tuple[int, np.ndarray]], threshol
 
 def identify_speakers(audio_path: Path, segments: list, enrolled: dict[str, np.ndarray]) -> list:
     """Identify speakers for each segment. Modifies segment.speaker in place and returns segments."""
-    if not enrolled and not segments:
+    if not enrolled or not segments:
         return segments
 
     unknown_embeddings = []  # (segment_index, embedding) for clustering
